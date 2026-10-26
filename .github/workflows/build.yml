@@ -29,7 +29,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Same inputs ByMykel's update.js uses to decide whether to regenerate.
       - name: Compare upstream inputs with last build
@@ -60,16 +60,16 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check out ByMykel/CSGO-API generator
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ByMykel/CSGO-API
           path: upstream
           fetch-depth: 1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -105,4 +105,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add state/version.txt
           git diff --cached --quiet || git commit -m "build: ${{ needs.check.outputs.version }}"
+          git pull --rebase
           git push
