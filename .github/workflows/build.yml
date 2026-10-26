@@ -1,0 +1,108 @@
+name: Build all languages
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if the upstream inputs are unchanged"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: latest
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same inputs ByMykel's update.js uses to decide whether to regenerate.
+      - name: Compare upstream inputs with last build
+        id: check
+        run: |
+          manifest=$(gh api repos/ByMykel/counter-strike-file-tracker/contents/static/manifestId.txt --jq .content | base64 -d | tr -d '[:space:]')
+          images=$(gh api repos/ByMykel/counter-strike-image-tracker/contents/static/images.json --jq .sha)
+          if [ -z "$manifest" ] || [ -z "$images" ]; then
+            echo "::error::Could not read upstream manifest id or images.json sha"
+            exit 1
+          fi
+          version="${manifest}:${images}"
+          current=$(cat state/version.txt 2>/dev/null || true)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$version" = "$current" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "Upstream unchanged ($version), nothing to build"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building $version (previous: ${current:-none})"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out ByMykel/CSGO-API generator
+        uses: actions/checkout@v4
+        with:
+          repository: ByMykel/CSGO-API
+          path: upstream
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Generate all languages
+        working-directory: upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NODE_OPTIONS: --max-old-space-size=8192 --import ${{ github.workspace }}/scripts/github-auth-fetch.mjs
+        run: |
+          node update.js --force --languages all
+          node group.js --force --languages all
+
+      - name: Validate and stage assets
+        run: node scripts/stage.mjs upstream dist "${{ needs.check.outputs.version }}"
+
+      # version.txt goes last so consumers only see the new version once every
+      # language asset has been replaced.
+      - name: Publish release assets
+        run: |
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "CS2 items, all languages" \
+              --notes "Rolling build of ByMykel/CSGO-API all.json for every language. Assets are replaced in place; see README.md."
+          fi
+          gh release upload "$RELEASE_TAG" dist/*.all.json --clobber
+          gh release upload "$RELEASE_TAG" dist/version.txt --clobber
+
+      - name: Record built version
+        run: |
+          mkdir -p state
+          echo "${{ needs.check.outputs.version }}" > state/version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/version.txt
+          git diff --cached --quiet || git commit -m "build: ${{ needs.check.outputs.version }}"
+          git push
